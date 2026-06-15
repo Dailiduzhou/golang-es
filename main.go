@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -106,4 +107,97 @@ func main() {
 	stats := bi.Stats()
 	log.Printf("完成！成功解析并写入 %d 条数据。", count)
 	log.Printf("Elasticsearch 新增: %d, 更新: %d, 失败: %d", stats.NumAdded, stats.NumUpdated, stats.NumFailed)
+
+	SearchPatents(es, "patents_index", "scratch removal", "2009")
+
+	SearchPatents(es, "patents_index", "NOVEL SCREENING METHOD", "")
+	SearchPatents(es, "patents_index", "Semiconductor device manufacturing method and semiconductor device manufacturing system", "")
+}
+
+func SearchPatents(es *elasticsearch.Client, indexName, keyword, year string) {
+	// 1. 动态构建 Bool 查询体
+	boolQuery := map[string]interface{}{
+		"must": []map[string]interface{}{
+			{
+				"multi_match": map[string]interface{}{
+					"query": keyword,
+					// 标题匹配的权重设置为摘要的 2 倍
+					"fields": []string{"publication_title^2", "abstract"},
+				},
+			},
+		},
+	}
+
+	// 2. 如果传入了年份，则动态追加 Filter 条件
+	if year != "" {
+		boolQuery["filter"] = []map[string]interface{}{
+			{
+				"prefix": map[string]interface{}{
+					"publication_date": year, // 利用前缀匹配 YYYYMMDD
+				},
+			},
+		}
+	}
+
+	// 组装最终的查询 Body
+	queryBody := map[string]interface{}{
+		"query": map[string]interface{}{
+			"bool": boolQuery,
+		},
+		"size": 10, // 仅返回前 10 条结果
+	}
+
+	// 将查询结构体转为 JSON 字节流
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(queryBody); err != nil {
+		log.Fatalf("解析查询条件失败: %s", err)
+	}
+
+	// 3. 发起 Search 请求
+	res, err := es.Search(
+		es.Search.WithContext(context.Background()),
+		es.Search.WithIndex(indexName),
+		es.Search.WithBody(&buf),
+		es.Search.WithTrackTotalHits(true), // 返回真实的命中总数
+	)
+	if err != nil {
+		log.Fatalf("搜索请求失败: %s", err)
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		log.Fatalf("Elasticsearch 返回错误: %s", res.String())
+	}
+
+	// 4. 解析搜索结果
+	var result map[string]interface{}
+	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
+		log.Fatalf("解析响应结果失败: %s", err)
+	}
+
+	// 提取 hits (命中结果)
+	hits := result["hits"].(map[string]interface{})
+	total := int(hits["total"].(map[string]interface{})["value"].(float64))
+	docs := hits["hits"].([]interface{})
+
+	fmt.Printf("搜索关键字 [%s] (年份: %s), 找到 %d 条结果:\n", keyword, year, total)
+
+	for i, hit := range docs {
+		doc := hit.(map[string]interface{})
+		source := doc["_source"].(map[string]interface{})
+		score := doc["_score"].(float64)
+
+		title := source["publication_title"].(string)
+		pubDate := source["publication_date"].(string)
+
+		fmt.Printf("%d. [得分: %.4f] [%s] %s\n", i+1, score, pubDate, title)
+
+		// 打印截取的摘要
+		abstract := source["abstract"].(string)
+		if len(abstract) > 100 {
+			fmt.Printf("   摘要: %s...\n", abstract[:100])
+		} else {
+			fmt.Printf("   摘要: %s\n", abstract)
+		}
+	}
 }
