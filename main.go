@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"time"
@@ -57,16 +58,18 @@ func main() {
 	}
 	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-
-	const maxCapacity = 512 * 1024
-	buf := make([]byte, maxCapacity)
-	scanner.Buffer(buf, maxCapacity)
+	reader := bufio.NewReaderSize(file, 2*1024*1024)
 
 	count := 0
-	for scanner.Scan() {
-
-		lineBytes := scanner.Bytes()
+	for {
+		lineBytes, err := reader.ReadBytes('\n')
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Fatalf("读取文件发生错误: %s", err)
+		}
+		lineBytes = bytes.TrimRight(lineBytes, "\n")
 
 		var patent Patent
 		if err := json.Unmarshal(lineBytes, &patent); err != nil {
@@ -94,10 +97,6 @@ func main() {
 			log.Fatalf("添加数据到 BulkIndexer 失败: %s", err)
 		}
 		count++
-	}
-
-	if err := scanner.Err(); err != nil {
-		log.Fatalf("读取文件发生错误: %s", err)
 	}
 
 	if err := bi.Close(context.Background()); err != nil {
